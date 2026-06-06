@@ -409,7 +409,7 @@ echo "--- 13. Org Cipher + Collection Permissions ---"
 RESP=$(curl -s -X POST "$BASE/api/ciphers" \
     -H "Authorization: Bearer $TOKEN1" \
     -H "Content-Type: application/json" \
-    -d "{\"type\":1,\"name\":\"2.org_cipher\",\"login\":{\"uri\":\"2.org_uri\"},\"organizationId\":\"$ORG_ID\",\"collectionIds\":[\"$DEFAULT_COLL_ID\"]}")
+    -d "{\"type\":1,\"name\":\"2.org_cipher\",\"login\":{\"uri\":\"2.org_uri\",\"username\":\"2.org_user\",\"password\":\"2.org_pass\"},\"organizationId\":\"$ORG_ID\",\"collectionIds\":[\"$DEFAULT_COLL_ID\"]}")
 ORG_CIPHER_ID=$(echo "$RESP" | json_field "['Id']")
 ORG_CIPHER_ORG=$(echo "$RESP" | json_field "['OrganizationId']")
 assert_eq "Org cipher has OrganizationId" "$ORG_ID" "$ORG_CIPHER_ORG"
@@ -444,6 +444,153 @@ TOKEN3=$(echo "$RESP" | json_field "['access_token']")
 HTTP=$(curl -s -o /dev/null -w "%{http_code}" "$BASE/api/ciphers/$ORG_CIPHER_ID" \
     -H "Authorization: Bearer $TOKEN3")
 assert_http "Non-member cannot read org cipher" "403" "$HTTP"
+
+# ========== 13b. READ-ONLY & HIDE-PASSWORDS PERMISSIONS ==========
+echo "--- 13b. Read-Only & HidePasswords Permissions ---"
+
+# Register user4 for permission testing
+curl -s -X POST "$BASE/api/accounts/register" \
+    -H "Content-Type: application/json" \
+    -d '{"email":"user4@test.com","masterPasswordHash":"hash4","name":"User4","key":"k4"}' > /dev/null
+RESP=$(curl -s -X POST "$BASE/identity/connect/token" \
+    -d "grant_type=password&username=user4@test.com&password=hash4&deviceIdentifier=dev-004&deviceName=D&deviceType=7")
+TOKEN4=$(echo "$RESP" | json_field "['access_token']")
+
+# Invite user4 as regular user with accessAll=false and read-only access to default collection
+HTTP=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/organizations/$ORG_ID/users/invite" \
+    -H "Authorization: Bearer $TOKEN1" \
+    -H "Content-Type: application/json" \
+    -d "{\"emails\":[\"user4@test.com\"],\"type\":2,\"accessAll\":false,\"collections\":[{\"id\":\"$DEFAULT_COLL_ID\",\"readOnly\":true,\"hidePasswords\":false}]}")
+assert_http "Invite user4 (read-only)" "200" "$HTTP"
+
+# Get user4's org membership ID
+RESP=$(curl -s "$BASE/api/organizations/$ORG_ID/users" -H "Authorization: Bearer $TOKEN1")
+USER4_ORG_ID=$(echo "$RESP" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+for u in d['Data']:
+    if u['Email'] == 'user4@test.com':
+        print(u['Id'])
+        break
+")
+
+# Confirm user4
+HTTP=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+    "$BASE/api/organizations/$ORG_ID/users/$USER4_ORG_ID/confirm" \
+    -H "Authorization: Bearer $TOKEN1" \
+    -H "Content-Type: application/json" \
+    -d '{"key":"2.org_user4_key"}')
+assert_http "Confirm user4" "200" "$HTTP"
+
+# Re-login user4 to get fresh token after confirm
+RESP=$(curl -s -X POST "$BASE/identity/connect/token" \
+    -d "grant_type=password&username=user4@test.com&password=hash4&deviceIdentifier=dev-004&deviceName=D&deviceType=7")
+TOKEN4=$(echo "$RESP" | json_field "['access_token']")
+
+# User4 (read-only) should see org cipher in sync with Edit=false
+RESP=$(curl -s "$BASE/api/sync" -H "Authorization: Bearer $TOKEN4")
+USER4_EDIT=$(echo "$RESP" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+org_ciphers = [c for c in d['Ciphers'] if c.get('OrganizationId') == '$ORG_ID']
+if org_ciphers:
+    print(org_ciphers[0].get('Edit', 'MISSING'))
+else:
+    print('NO_CIPHER')
+")
+assert_eq "Read-only user sees Edit=False" "False" "$USER4_EDIT"
+
+# User4 (read-only) should NOT be able to update org cipher
+HTTP=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$BASE/api/ciphers/$ORG_CIPHER_ID" \
+    -H "Authorization: Bearer $TOKEN4" \
+    -H "Content-Type: application/json" \
+    -d '{"type":1,"name":"2.hacked","login":{"uri":"2.evil"}}')
+assert_http "Read-only user cannot update cipher" "403" "$HTTP"
+
+# User4 (read-only) should NOT be able to delete org cipher
+HTTP=$(curl -s -o /dev/null -w "%{http_code}" -X PUT "$BASE/api/ciphers/$ORG_CIPHER_ID/delete" \
+    -H "Authorization: Bearer $TOKEN4")
+assert_http "Read-only user cannot soft-delete cipher" "403" "$HTTP"
+
+# Register user5 for hidePasswords testing
+curl -s -X POST "$BASE/api/accounts/register" \
+    -H "Content-Type: application/json" \
+    -d '{"email":"user5@test.com","masterPasswordHash":"hash5","name":"User5","key":"k5"}' > /dev/null
+RESP=$(curl -s -X POST "$BASE/identity/connect/token" \
+    -d "grant_type=password&username=user5@test.com&password=hash5&deviceIdentifier=dev-005&deviceName=D&deviceType=7")
+TOKEN5=$(echo "$RESP" | json_field "['access_token']")
+
+# Invite user5 with hidePasswords=true on default collection
+HTTP=$(curl -s -o /dev/null -w "%{http_code}" -X POST "$BASE/api/organizations/$ORG_ID/users/invite" \
+    -H "Authorization: Bearer $TOKEN1" \
+    -H "Content-Type: application/json" \
+    -d "{\"emails\":[\"user5@test.com\"],\"type\":2,\"accessAll\":false,\"collections\":[{\"id\":\"$DEFAULT_COLL_ID\",\"readOnly\":false,\"hidePasswords\":true}]}")
+assert_http "Invite user5 (hidePasswords)" "200" "$HTTP"
+
+# Get user5's org membership ID and confirm
+RESP=$(curl -s "$BASE/api/organizations/$ORG_ID/users" -H "Authorization: Bearer $TOKEN1")
+USER5_ORG_ID=$(echo "$RESP" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+for u in d['Data']:
+    if u['Email'] == 'user5@test.com':
+        print(u['Id'])
+        break
+")
+HTTP=$(curl -s -o /dev/null -w "%{http_code}" -X POST \
+    "$BASE/api/organizations/$ORG_ID/users/$USER5_ORG_ID/confirm" \
+    -H "Authorization: Bearer $TOKEN1" \
+    -H "Content-Type: application/json" \
+    -d '{"key":"2.org_user5_key"}')
+assert_http "Confirm user5" "200" "$HTTP"
+
+# Re-login user5
+RESP=$(curl -s -X POST "$BASE/identity/connect/token" \
+    -d "grant_type=password&username=user5@test.com&password=hash5&deviceIdentifier=dev-005&deviceName=D&deviceType=7")
+TOKEN5=$(echo "$RESP" | json_field "['access_token']")
+
+# User5 should see ViewPassword=False in sync
+RESP=$(curl -s "$BASE/api/sync" -H "Authorization: Bearer $TOKEN5")
+USER5_VP=$(echo "$RESP" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+org_ciphers = [c for c in d['Ciphers'] if c.get('OrganizationId') == '$ORG_ID']
+if org_ciphers:
+    print(org_ciphers[0].get('ViewPassword', 'MISSING'))
+else:
+    print('NO_CIPHER')
+")
+assert_eq "HidePasswords user sees ViewPassword=False" "False" "$USER5_VP"
+
+# User5 should have Edit=True (not read-only)
+USER5_EDIT=$(echo "$RESP" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+org_ciphers = [c for c in d['Ciphers'] if c.get('OrganizationId') == '$ORG_ID']
+if org_ciphers:
+    print(org_ciphers[0].get('Edit', 'MISSING'))
+else:
+    print('NO_CIPHER')
+")
+assert_eq "HidePasswords user can still edit" "True" "$USER5_EDIT"
+
+# User5 should have password field redacted (Login.Password = null)
+USER5_PWD=$(echo "$RESP" | python3 -c "
+import sys,json
+d=json.load(sys.stdin)
+org_ciphers = [c for c in d['Ciphers'] if c.get('OrganizationId') == '$ORG_ID']
+if org_ciphers:
+    login = org_ciphers[0].get('Login', {})
+    if login is None:
+        print('NULL_LOGIN')
+    else:
+        # Check both PascalCase and lowercase (redaction normalizes to PascalCase null)
+        pwd = login.get('Password', login.get('password', 'MISSING'))
+        print('REDACTED' if pwd is None else pwd)
+else:
+    print('NO_CIPHER')
+")
+assert_eq "HidePasswords: password is redacted" "REDACTED" "$USER5_PWD"
 
 # ========== 14. TWO-FACTOR AUTHENTICATION ==========
 echo "--- 14. Two-Factor Auth ---"

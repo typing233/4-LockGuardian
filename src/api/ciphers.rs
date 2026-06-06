@@ -249,6 +249,10 @@ pub async fn create(
         None,
     )
     .await
+    .map_err(|e| {
+        tracing::error!("Failed to log cipher create event: {}", e);
+        e
+    })
     .ok();
 
     Ok(HttpResponse::Ok().json(cipher.to_json(&config.domain)))
@@ -300,6 +304,10 @@ pub async fn update(
         None,
     )
     .await
+    .map_err(|e| {
+        tracing::error!("Failed to log cipher update event: {}", e);
+        e
+    })
     .ok();
 
     Ok(HttpResponse::Ok().json(updated.to_json(&config.domain)))
@@ -331,6 +339,10 @@ pub async fn soft_delete(
         None,
     )
     .await
+    .map_err(|e| {
+        tracing::error!("Failed to log cipher soft-delete event: {}", e);
+        e
+    })
     .ok();
 
     Ok(HttpResponse::Ok().finish())
@@ -362,6 +374,10 @@ pub async fn hard_delete(
         None,
     )
     .await
+    .map_err(|e| {
+        tracing::error!("Failed to log cipher hard-delete event: {}", e);
+        e
+    })
     .ok();
 
     Ok(HttpResponse::Ok().finish())
@@ -394,6 +410,10 @@ pub async fn restore(
         None,
     )
     .await
+    .map_err(|e| {
+        tracing::error!("Failed to log cipher restore event: {}", e);
+        e
+    })
     .ok();
 
     let restored = Cipher::find_by_uuid(&pool, &uuid)

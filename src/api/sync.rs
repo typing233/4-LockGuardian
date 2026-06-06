@@ -12,6 +12,13 @@ use crate::models::organization::{
 };
 use crate::models::user::User;
 
+#[derive(sqlx::FromRow)]
+struct CipherCollectionPerm {
+    cipher_uuid: String,
+    read_only: bool,
+    hide_passwords: bool,
+}
+
 pub async fn sync(
     user: AuthenticatedUser,
     pool: web::Data<SqlitePool>,
@@ -39,15 +46,21 @@ pub async fn sync(
 
         let org_ciphers = Cipher::find_by_org(&pool, &uo.org_uuid).await?;
 
-        // Owner/Admin/access_all can see all org ciphers
-        if uo.type_ <= ORG_USER_TYPE_ADMIN || uo.access_all {
+        // Owner/Admin can see/edit all org ciphers
+        if uo.type_ <= ORG_USER_TYPE_ADMIN {
+            for c in &org_ciphers {
+                all_ciphers.push(c.to_json(&config.domain));
+            }
+        } else if uo.access_all {
+            // access_all grants read+write to all org ciphers
             for c in &org_ciphers {
                 all_ciphers.push(c.to_json(&config.domain));
             }
         } else {
-            // Only ciphers in collections the user has access to
-            let accessible_cipher_uuids: Vec<(String,)> = sqlx::query_as(
-                "SELECT DISTINCT cc.cipher_uuid FROM ciphers_collections cc
+            // Only ciphers in collections the user has access to, with permission flags
+            let perms: Vec<CipherCollectionPerm> = sqlx::query_as(
+                "SELECT cc.cipher_uuid, uc.read_only, uc.hide_passwords
+                 FROM ciphers_collections cc
                  INNER JOIN users_collections uc ON uc.collection_uuid = cc.collection_uuid
                  INNER JOIN ciphers ci ON ci.uuid = cc.cipher_uuid
                  WHERE uc.user_uuid = ? AND ci.organization_uuid = ?"
@@ -57,14 +70,26 @@ pub async fn sync(
             .fetch_all(pool.get_ref())
             .await?;
 
-            let accessible_set: std::collections::HashSet<&str> = accessible_cipher_uuids
-                .iter()
-                .map(|(id,)| id.as_str())
-                .collect();
+            // Aggregate permissions per cipher: most permissive wins
+            let mut cipher_perms: std::collections::HashMap<&str, (bool, bool)> =
+                std::collections::HashMap::new();
+            for p in &perms {
+                let entry = cipher_perms.entry(p.cipher_uuid.as_str()).or_insert((true, true));
+                // If any collection grants write (read_only=false), user can edit
+                if !p.read_only {
+                    entry.0 = false; // not read_only
+                }
+                // If any collection grants view_password (hide_passwords=false), user can view
+                if !p.hide_passwords {
+                    entry.1 = false; // not hide_passwords
+                }
+            }
 
             for c in &org_ciphers {
-                if accessible_set.contains(c.uuid.as_str()) {
-                    all_ciphers.push(c.to_json(&config.domain));
+                if let Some(&(read_only, hide_passwords)) = cipher_perms.get(c.uuid.as_str()) {
+                    let can_edit = !read_only;
+                    let view_password = !hide_passwords;
+                    all_ciphers.push(c.to_json_with_permissions(&config.domain, can_edit, view_password));
                 }
             }
         }

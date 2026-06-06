@@ -126,6 +126,10 @@ pub async fn activate_authenticator(
         None,
     )
     .await
+    .map_err(|e| {
+        tracing::error!("Failed to log 2FA enable event: {}", e);
+        e
+    })
     .ok();
 
     Ok(HttpResponse::Ok().json(serde_json::json!({
@@ -168,6 +172,10 @@ pub async fn disable(
         None,
     )
     .await
+    .map_err(|e| {
+        tracing::error!("Failed to log 2FA disable event: {}", e);
+        e
+    })
     .ok();
 
     Ok(HttpResponse::Ok().json(serde_json::json!({

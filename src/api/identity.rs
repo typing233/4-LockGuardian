@@ -141,6 +141,10 @@ async fn handle_password_grant(
         None,
     )
     .await
+    .map_err(|e| {
+        tracing::error!("Failed to log login event: {}", e);
+        e
+    })
     .ok();
 
     let access_token = crate::auth::token::generate_access_token(

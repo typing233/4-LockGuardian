@@ -173,6 +173,10 @@ impl Cipher {
     }
 
     pub fn to_json(&self, domain: &str) -> Value {
+        self.to_json_with_permissions(domain, true, true)
+    }
+
+    pub fn to_json_with_permissions(&self, domain: &str, can_edit: bool, view_password: bool) -> Value {
         let data: Value = serde_json::from_str(&self.data).unwrap_or(Value::Null);
         let fields: Option<Value> = self
             .fields
@@ -187,17 +191,29 @@ impl Cipher {
             _ => "Login",
         };
 
+        let (data_out, type_data_out) = if view_password {
+            (data.clone(), data)
+        } else {
+            (Self::redact_passwords(&data, self.type_), Self::redact_passwords(&data, self.type_))
+        };
+
+        let name = if view_password {
+            self.name.clone()
+        } else {
+            self.name.clone()
+        };
+
         serde_json::json!({
             "Object": "cipher",
             "Id": self.uuid,
             "OrganizationId": self.organization_uuid,
             "FolderId": self.folder_uuid,
             "Type": self.type_,
-            "Name": self.name,
+            "Name": name,
             "Notes": self.notes,
             "Fields": fields,
-            type_field: data,
-            "Data": data,
+            type_field: type_data_out,
+            "Data": data_out,
             "Favorite": self.favorite,
             "Reprompt": self.reprompt,
             "OrganizationUseTotp": false,
@@ -206,8 +222,38 @@ impl Cipher {
             "DeletedDate": self.deleted_at,
             "Attachments": null,
             "CollectionIds": [],
-            "Edit": true,
-            "ViewPassword": true,
+            "Edit": can_edit,
+            "ViewPassword": view_password,
         })
+    }
+
+    fn redact_passwords(data: &Value, type_: i32) -> Value {
+        let mut d = data.clone();
+        if type_ == 1 {
+            // Login type - redact password and totp
+            if let Some(obj) = d.as_object_mut() {
+                if obj.contains_key("password") || obj.contains_key("Password") {
+                    obj.insert("Password".to_string(), Value::Null);
+                    obj.remove("password");
+                }
+                if obj.contains_key("totp") || obj.contains_key("Totp") {
+                    obj.insert("Totp".to_string(), Value::Null);
+                    obj.remove("totp");
+                }
+            }
+        } else if type_ == 3 {
+            // Card type - redact code and number
+            if let Some(obj) = d.as_object_mut() {
+                if obj.contains_key("code") || obj.contains_key("Code") {
+                    obj.insert("Code".to_string(), Value::Null);
+                    obj.remove("code");
+                }
+                if obj.contains_key("number") || obj.contains_key("Number") {
+                    obj.insert("Number".to_string(), Value::Null);
+                    obj.remove("number");
+                }
+            }
+        }
+        d
     }
 }

@@ -83,6 +83,10 @@ pub async fn create(
         None,
     )
     .await
+    .map_err(|e| {
+        tracing::error!("Failed to log collection create event: {}", e);
+        e
+    })
     .ok();
 
     Ok(HttpResponse::Ok().json(collection.to_json()))

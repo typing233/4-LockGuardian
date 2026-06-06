@@ -85,6 +85,7 @@ pub async fn create(
         &org.uuid,
         ORG_USER_TYPE_OWNER,
         ORG_USER_STATUS_CONFIRMED,
+        true,
         body.key.as_deref(),
     )
     .await?;
@@ -200,6 +201,7 @@ pub async fn invite_user(
     }
 
     let invite_type = body.type_.unwrap_or(ORG_USER_TYPE_USER);
+    let invite_access_all = body.access_all.unwrap_or(false);
 
     for email in &body.emails {
         if let Some(invited_user) = User::find_by_email(&pool, email).await? {
@@ -208,15 +210,43 @@ pub async fn invite_user(
                 .await?
                 .is_none()
             {
-                UserOrganization::create(
+                let new_uo = UserOrganization::create(
                     &pool,
                     &invited_user.uuid,
                     &org_id,
                     invite_type,
                     ORG_USER_STATUS_INVITED,
+                    invite_access_all,
                     None,
                 )
                 .await?;
+
+                // Assign collection permissions if provided
+                if let Some(collections) = &body.collections {
+                    for coll in collections {
+                        let coll_id = coll.get("id")
+                            .or_else(|| coll.get("Id"))
+                            .and_then(|v| v.as_str());
+                        if let Some(coll_id) = coll_id {
+                            let read_only = coll.get("readOnly")
+                                .or_else(|| coll.get("ReadOnly"))
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            let hide_passwords = coll.get("hidePasswords")
+                                .or_else(|| coll.get("HidePasswords"))
+                                .and_then(|v| v.as_bool())
+                                .unwrap_or(false);
+                            crate::models::collection::Collection::add_user(
+                                &pool,
+                                coll_id,
+                                &invited_user.uuid,
+                                read_only,
+                                hide_passwords,
+                            )
+                            .await?;
+                        }
+                    }
+                }
 
                 Event::log(
                     &pool,
@@ -230,6 +260,10 @@ pub async fn invite_user(
                     None,
                 )
                 .await
+                .map_err(|e| {
+                    tracing::error!("Failed to log invite event: {}", e);
+                    e
+                })
                 .ok();
             }
         }
@@ -268,6 +302,10 @@ pub async fn confirm_user(
         None,
     )
     .await
+    .map_err(|e| {
+        tracing::error!("Failed to log confirm event: {}", e);
+        e
+    })
     .ok();
 
     Ok(HttpResponse::Ok().finish())
@@ -302,6 +340,10 @@ pub async fn remove_user(
         None,
     )
     .await
+    .map_err(|e| {
+        tracing::error!("Failed to log remove event: {}", e);
+        e
+    })
     .ok();
 
     Ok(HttpResponse::Ok().finish())

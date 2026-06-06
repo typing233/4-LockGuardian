@@ -118,13 +118,14 @@ impl UserOrganization {
         org_uuid: &str,
         type_: i32,
         status: i32,
+        access_all: bool,
         key: Option<&str>,
     ) -> Result<Self, AppError> {
         let uuid = uuid::Uuid::new_v4().to_string();
         let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string();
 
         sqlx::query(
-            "INSERT INTO users_organizations (uuid, user_uuid, org_uuid, type_, status, key_, access_all, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, 1, ?, ?)"
+            "INSERT INTO users_organizations (uuid, user_uuid, org_uuid, type_, status, key_, access_all, created_at, updated_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)"
         )
         .bind(&uuid)
         .bind(user_uuid)
@@ -132,6 +133,7 @@ impl UserOrganization {
         .bind(type_)
         .bind(status)
         .bind(key)
+        .bind(access_all)
         .bind(&now)
         .bind(&now)
         .execute(pool)
@@ -141,7 +143,7 @@ impl UserOrganization {
             uuid,
             user_uuid: user_uuid.to_string(),
             org_uuid: org_uuid.to_string(),
-            access_all: true,
+            access_all,
             key_: key.map(String::from),
             status,
             type_,
