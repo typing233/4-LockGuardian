@@ -16,12 +16,13 @@ pub struct Attachment {
 impl Attachment {
     pub async fn create(
         pool: &SqlitePool,
+        id: &str,
         cipher_uuid: &str,
         file_name: &str,
         file_size: i64,
         key: Option<&str>,
     ) -> Result<Self, AppError> {
-        let id = uuid::Uuid::new_v4().to_string();
+        let id = id.to_string();
         let now = chrono::Utc::now().format("%Y-%m-%dT%H:%M:%S%.6fZ").to_string();
 
         sqlx::query(

@@ -7,6 +7,114 @@ use crate::auth::middleware::AuthenticatedUser;
 use crate::config::AppConfig;
 use crate::error::AppError;
 use crate::models::cipher::Cipher;
+use crate::models::event::{
+    Event, EVENT_CIPHER_CREATED, EVENT_CIPHER_DELETED, EVENT_CIPHER_RESTORED,
+    EVENT_CIPHER_UPDATED,
+};
+use crate::models::organization::{
+    UserOrganization, ORG_USER_STATUS_CONFIRMED, ORG_USER_TYPE_ADMIN, ORG_USER_TYPE_OWNER,
+};
+
+/// Check if user can read a cipher (personal or org-based with proper access).
+async fn check_cipher_read(
+    pool: &SqlitePool,
+    cipher: &Cipher,
+    user_uuid: &str,
+) -> Result<(), AppError> {
+    // Personal cipher
+    if cipher.user_uuid.as_deref() == Some(user_uuid) {
+        return Ok(());
+    }
+    // Org cipher - verify membership and access
+    if let Some(org_uuid) = &cipher.organization_uuid {
+        let uo = UserOrganization::find_by_user_and_org(pool, user_uuid, org_uuid)
+            .await?
+            .ok_or_else(|| AppError::Forbidden("Not a member of this organization".to_string()))?;
+        if uo.status != ORG_USER_STATUS_CONFIRMED {
+            return Err(AppError::Forbidden("Membership not confirmed".to_string()));
+        }
+        // Owner/Admin/access_all can read all
+        if uo.type_ <= ORG_USER_TYPE_ADMIN || uo.access_all {
+            return Ok(());
+        }
+        // Check collection-level access
+        let has_access: Option<(i32,)> = sqlx::query_as(
+            "SELECT 1 FROM ciphers_collections cc
+             INNER JOIN users_collections uc ON uc.collection_uuid = cc.collection_uuid
+             WHERE cc.cipher_uuid = ? AND uc.user_uuid = ?
+             LIMIT 1"
+        )
+        .bind(&cipher.uuid)
+        .bind(user_uuid)
+        .fetch_optional(pool)
+        .await?;
+        if has_access.is_some() {
+            return Ok(());
+        }
+        return Err(AppError::Forbidden("No access to this cipher".to_string()));
+    }
+    Err(AppError::Forbidden("Access denied".to_string()))
+}
+
+/// Check if user can write (create/update/delete) a cipher.
+async fn check_cipher_write(
+    pool: &SqlitePool,
+    cipher: &Cipher,
+    user_uuid: &str,
+) -> Result<(), AppError> {
+    // Personal cipher
+    if cipher.user_uuid.as_deref() == Some(user_uuid) {
+        return Ok(());
+    }
+    // Org cipher
+    if let Some(org_uuid) = &cipher.organization_uuid {
+        let uo = UserOrganization::find_by_user_and_org(pool, user_uuid, org_uuid)
+            .await?
+            .ok_or_else(|| AppError::Forbidden("Not a member of this organization".to_string()))?;
+        if uo.status != ORG_USER_STATUS_CONFIRMED {
+            return Err(AppError::Forbidden("Membership not confirmed".to_string()));
+        }
+        // Owner/Admin can write all
+        if uo.type_ <= ORG_USER_TYPE_ADMIN {
+            return Ok(());
+        }
+        // access_all grants write
+        if uo.access_all {
+            return Ok(());
+        }
+        // Check collection-level write (not read_only)
+        let has_write: Option<(i32,)> = sqlx::query_as(
+            "SELECT 1 FROM ciphers_collections cc
+             INNER JOIN users_collections uc ON uc.collection_uuid = cc.collection_uuid
+             WHERE cc.cipher_uuid = ? AND uc.user_uuid = ? AND uc.read_only = 0
+             LIMIT 1"
+        )
+        .bind(&cipher.uuid)
+        .bind(user_uuid)
+        .fetch_optional(pool)
+        .await?;
+        if has_write.is_some() {
+            return Ok(());
+        }
+        return Err(AppError::Forbidden("Read-only access to this cipher".to_string()));
+    }
+    Err(AppError::Forbidden("Access denied".to_string()))
+}
+
+/// Check if user can create ciphers in an org.
+async fn check_org_create_access(
+    pool: &SqlitePool,
+    org_uuid: &str,
+    user_uuid: &str,
+) -> Result<(), AppError> {
+    let uo = UserOrganization::find_by_user_and_org(pool, user_uuid, org_uuid)
+        .await?
+        .ok_or_else(|| AppError::Forbidden("Not a member of this organization".to_string()))?;
+    if uo.status != ORG_USER_STATUS_CONFIRMED {
+        return Err(AppError::Forbidden("Membership not confirmed".to_string()));
+    }
+    Ok(())
+}
 
 #[derive(Deserialize)]
 pub struct CipherRequest {
@@ -83,9 +191,7 @@ pub async fn get(
         .await?
         .ok_or_else(|| AppError::NotFound("Cipher not found".to_string()))?;
 
-    if cipher.user_uuid.as_deref() != Some(&user.uuid) && cipher.organization_uuid.is_none() {
-        return Err(AppError::Forbidden("Access denied".to_string()));
-    }
+    check_cipher_read(&pool, &cipher, &user.uuid).await?;
 
     Ok(HttpResponse::Ok().json(cipher.to_json(&config.domain)))
 }
@@ -96,6 +202,11 @@ pub async fn create(
     pool: web::Data<SqlitePool>,
     config: web::Data<AppConfig>,
 ) -> Result<HttpResponse, AppError> {
+    // If creating in an org, verify membership
+    if let Some(org_id) = &body.organization_id {
+        check_org_create_access(&pool, org_id, &user.uuid).await?;
+    }
+
     let data = body.get_data();
     let fields = body.fields.as_ref().map(|f| f.to_string());
 
@@ -126,6 +237,20 @@ pub async fn create(
         }
     }
 
+    Event::log(
+        &pool,
+        EVENT_CIPHER_CREATED,
+        cipher.user_uuid.as_deref(),
+        cipher.organization_uuid.as_deref(),
+        Some(&cipher.uuid),
+        None,
+        Some(&user.uuid),
+        None,
+        None,
+    )
+    .await
+    .ok();
+
     Ok(HttpResponse::Ok().json(cipher.to_json(&config.domain)))
 }
 
@@ -141,9 +266,7 @@ pub async fn update(
         .await?
         .ok_or_else(|| AppError::NotFound("Cipher not found".to_string()))?;
 
-    if cipher.user_uuid.as_deref() != Some(&user.uuid) && cipher.organization_uuid.is_none() {
-        return Err(AppError::Forbidden("Access denied".to_string()));
-    }
+    check_cipher_write(&pool, &cipher, &user.uuid).await?;
 
     let data = body.get_data();
     let fields = body.fields.as_ref().map(|f| f.to_string());
@@ -165,6 +288,20 @@ pub async fn update(
         .await?
         .ok_or_else(|| AppError::Internal("Cipher disappeared".to_string()))?;
 
+    Event::log(
+        &pool,
+        EVENT_CIPHER_UPDATED,
+        updated.user_uuid.as_deref(),
+        updated.organization_uuid.as_deref(),
+        Some(&uuid),
+        None,
+        Some(&user.uuid),
+        None,
+        None,
+    )
+    .await
+    .ok();
+
     Ok(HttpResponse::Ok().json(updated.to_json(&config.domain)))
 }
 
@@ -178,11 +315,24 @@ pub async fn soft_delete(
         .await?
         .ok_or_else(|| AppError::NotFound("Cipher not found".to_string()))?;
 
-    if cipher.user_uuid.as_deref() != Some(&user.uuid) && cipher.organization_uuid.is_none() {
-        return Err(AppError::Forbidden("Access denied".to_string()));
-    }
+    check_cipher_write(&pool, &cipher, &user.uuid).await?;
 
     Cipher::soft_delete(&pool, &uuid).await?;
+
+    Event::log(
+        &pool,
+        EVENT_CIPHER_DELETED,
+        cipher.user_uuid.as_deref(),
+        cipher.organization_uuid.as_deref(),
+        Some(&uuid),
+        None,
+        Some(&user.uuid),
+        None,
+        None,
+    )
+    .await
+    .ok();
+
     Ok(HttpResponse::Ok().finish())
 }
 
@@ -196,11 +346,24 @@ pub async fn hard_delete(
         .await?
         .ok_or_else(|| AppError::NotFound("Cipher not found".to_string()))?;
 
-    if cipher.user_uuid.as_deref() != Some(&user.uuid) && cipher.organization_uuid.is_none() {
-        return Err(AppError::Forbidden("Access denied".to_string()));
-    }
+    check_cipher_write(&pool, &cipher, &user.uuid).await?;
 
     Cipher::hard_delete(&pool, &uuid).await?;
+
+    Event::log(
+        &pool,
+        EVENT_CIPHER_DELETED,
+        cipher.user_uuid.as_deref(),
+        cipher.organization_uuid.as_deref(),
+        Some(&uuid),
+        None,
+        Some(&user.uuid),
+        None,
+        None,
+    )
+    .await
+    .ok();
+
     Ok(HttpResponse::Ok().finish())
 }
 
@@ -215,11 +378,23 @@ pub async fn restore(
         .await?
         .ok_or_else(|| AppError::NotFound("Cipher not found".to_string()))?;
 
-    if cipher.user_uuid.as_deref() != Some(&user.uuid) && cipher.organization_uuid.is_none() {
-        return Err(AppError::Forbidden("Access denied".to_string()));
-    }
+    check_cipher_write(&pool, &cipher, &user.uuid).await?;
 
     Cipher::restore(&pool, &uuid).await?;
+
+    Event::log(
+        &pool,
+        EVENT_CIPHER_RESTORED,
+        cipher.user_uuid.as_deref(),
+        cipher.organization_uuid.as_deref(),
+        Some(&uuid),
+        None,
+        Some(&user.uuid),
+        None,
+        None,
+    )
+    .await
+    .ok();
 
     let restored = Cipher::find_by_uuid(&pool, &uuid)
         .await?
@@ -235,9 +410,7 @@ pub async fn bulk_soft_delete(
 ) -> Result<HttpResponse, AppError> {
     for id in &body.ids {
         if let Some(cipher) = Cipher::find_by_uuid(&pool, id).await? {
-            if cipher.user_uuid.as_deref() == Some(&user.uuid)
-                || cipher.organization_uuid.is_some()
-            {
+            if check_cipher_write(&pool, &cipher, &user.uuid).await.is_ok() {
                 Cipher::soft_delete(&pool, id).await?;
             }
         }
@@ -252,9 +425,7 @@ pub async fn bulk_restore(
 ) -> Result<HttpResponse, AppError> {
     for id in &body.ids {
         if let Some(cipher) = Cipher::find_by_uuid(&pool, id).await? {
-            if cipher.user_uuid.as_deref() == Some(&user.uuid)
-                || cipher.organization_uuid.is_some()
-            {
+            if check_cipher_write(&pool, &cipher, &user.uuid).await.is_ok() {
                 Cipher::restore(&pool, id).await?;
             }
         }

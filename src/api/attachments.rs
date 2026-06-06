@@ -9,6 +9,45 @@ use crate::config::AppConfig;
 use crate::error::AppError;
 use crate::models::attachment::Attachment;
 use crate::models::cipher::Cipher;
+use crate::models::organization::{
+    UserOrganization, ORG_USER_STATUS_CONFIRMED, ORG_USER_TYPE_ADMIN,
+};
+
+async fn check_cipher_write_access(
+    pool: &SqlitePool,
+    cipher: &Cipher,
+    user_uuid: &str,
+) -> Result<(), AppError> {
+    if cipher.user_uuid.as_deref() == Some(user_uuid) {
+        return Ok(());
+    }
+    if let Some(org_uuid) = &cipher.organization_uuid {
+        let uo = UserOrganization::find_by_user_and_org(pool, user_uuid, org_uuid)
+            .await?
+            .ok_or_else(|| AppError::Forbidden("Not a member of this organization".to_string()))?;
+        if uo.status != ORG_USER_STATUS_CONFIRMED {
+            return Err(AppError::Forbidden("Membership not confirmed".to_string()));
+        }
+        if uo.type_ <= ORG_USER_TYPE_ADMIN || uo.access_all {
+            return Ok(());
+        }
+        let has_write: Option<(i32,)> = sqlx::query_as(
+            "SELECT 1 FROM ciphers_collections cc
+             INNER JOIN users_collections uc ON uc.collection_uuid = cc.collection_uuid
+             WHERE cc.cipher_uuid = ? AND uc.user_uuid = ? AND uc.read_only = 0
+             LIMIT 1"
+        )
+        .bind(&cipher.uuid)
+        .bind(user_uuid)
+        .fetch_optional(pool)
+        .await?;
+        if has_write.is_some() {
+            return Ok(());
+        }
+        return Err(AppError::Forbidden("Read-only access".to_string()));
+    }
+    Err(AppError::Forbidden("Access denied".to_string()))
+}
 
 pub async fn upload(
     user: AuthenticatedUser,
@@ -23,9 +62,7 @@ pub async fn upload(
         .await?
         .ok_or_else(|| AppError::NotFound("Cipher not found".to_string()))?;
 
-    if cipher.user_uuid.as_deref() != Some(&user.uuid) && cipher.organization_uuid.is_none() {
-        return Err(AppError::Forbidden("Access denied".to_string()));
-    }
+    check_cipher_write_access(&pool, &cipher, &user.uuid).await?;
 
     let attachments_dir = PathBuf::from(&config.attachments_folder).join(&cipher_uuid);
     tokio::fs::create_dir_all(&attachments_dir)
@@ -81,6 +118,7 @@ pub async fn upload(
 
     let attachment = Attachment::create(
         &pool,
+        &attachment_id,
         &cipher_uuid,
         &file_name,
         file_size,
@@ -140,9 +178,7 @@ pub async fn delete_attachment(
         .await?
         .ok_or_else(|| AppError::NotFound("Cipher not found".to_string()))?;
 
-    if cipher.user_uuid.as_deref() != Some(&user.uuid) && cipher.organization_uuid.is_none() {
-        return Err(AppError::Forbidden("Access denied".to_string()));
-    }
+    check_cipher_write_access(&pool, &cipher, &user.uuid).await?;
 
     // Delete file
     let file_path = PathBuf::from(&config.attachments_folder)

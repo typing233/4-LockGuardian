@@ -5,6 +5,7 @@ use sqlx::SqlitePool;
 use crate::auth::middleware::AuthenticatedUser;
 use crate::error::AppError;
 use crate::models::collection::Collection;
+use crate::models::event::{Event, EVENT_COLLECTION_CREATED};
 use crate::models::organization::*;
 
 #[derive(Deserialize)]
@@ -69,6 +70,21 @@ pub async fn create(
     }
 
     let collection = Collection::create(&pool, &org_id, &body.name).await?;
+
+    Event::log(
+        &pool,
+        EVENT_COLLECTION_CREATED,
+        None,
+        Some(&org_id),
+        None,
+        Some(&collection.uuid),
+        Some(&user.uuid),
+        None,
+        None,
+    )
+    .await
+    .ok();
+
     Ok(HttpResponse::Ok().json(collection.to_json()))
 }
 

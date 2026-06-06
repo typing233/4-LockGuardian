@@ -7,6 +7,7 @@ use crate::auth::two_factor;
 use crate::crypto::RsaKeys;
 use crate::error::AppError;
 use crate::models::device::Device;
+use crate::models::event::{Event, EVENT_USER_LOGGED_IN};
 use crate::models::user::User;
 
 #[derive(Deserialize)]
@@ -126,6 +127,21 @@ async fn handle_password_grant(
 
     let device = Device::create_or_update(pool, &user.uuid, device_id, device_name, device_type)
         .await?;
+
+    // Log login event
+    Event::log(
+        pool,
+        EVENT_USER_LOGGED_IN,
+        Some(&user.uuid),
+        None,
+        None,
+        None,
+        Some(&user.uuid),
+        Some(device_type),
+        None,
+    )
+    .await
+    .ok();
 
     let access_token = crate::auth::token::generate_access_token(
         &user.uuid,

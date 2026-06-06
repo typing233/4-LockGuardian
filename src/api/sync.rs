@@ -7,7 +7,9 @@ use crate::error::AppError;
 use crate::models::cipher::Cipher;
 use crate::models::collection::Collection;
 use crate::models::folder::Folder;
-use crate::models::organization::{Organization, UserOrganization};
+use crate::models::organization::{
+    Organization, UserOrganization, ORG_USER_STATUS_CONFIRMED, ORG_USER_TYPE_ADMIN,
+};
 use crate::models::user::User;
 
 pub async fn sync(
@@ -24,19 +26,46 @@ pub async fn sync(
     let user_orgs = UserOrganization::find_by_user(&pool, &user.uuid).await?;
     let collections = Collection::find_by_user(&pool, &user.uuid).await?;
 
-    // Build org ciphers
     let mut all_ciphers: Vec<serde_json::Value> = ciphers
         .iter()
         .map(|c| c.to_json(&config.domain))
         .collect();
 
-    // Include org ciphers
+    // Include org ciphers with proper permission filtering
     for uo in &user_orgs {
-        if uo.status == 2 {
-            // Confirmed
-            let org_ciphers = Cipher::find_by_org(&pool, &uo.org_uuid).await?;
+        if uo.status != ORG_USER_STATUS_CONFIRMED {
+            continue;
+        }
+
+        let org_ciphers = Cipher::find_by_org(&pool, &uo.org_uuid).await?;
+
+        // Owner/Admin/access_all can see all org ciphers
+        if uo.type_ <= ORG_USER_TYPE_ADMIN || uo.access_all {
             for c in &org_ciphers {
                 all_ciphers.push(c.to_json(&config.domain));
+            }
+        } else {
+            // Only ciphers in collections the user has access to
+            let accessible_cipher_uuids: Vec<(String,)> = sqlx::query_as(
+                "SELECT DISTINCT cc.cipher_uuid FROM ciphers_collections cc
+                 INNER JOIN users_collections uc ON uc.collection_uuid = cc.collection_uuid
+                 INNER JOIN ciphers ci ON ci.uuid = cc.cipher_uuid
+                 WHERE uc.user_uuid = ? AND ci.organization_uuid = ?"
+            )
+            .bind(&user.uuid)
+            .bind(&uo.org_uuid)
+            .fetch_all(pool.get_ref())
+            .await?;
+
+            let accessible_set: std::collections::HashSet<&str> = accessible_cipher_uuids
+                .iter()
+                .map(|(id,)| id.as_str())
+                .collect();
+
+            for c in &org_ciphers {
+                if accessible_set.contains(c.uuid.as_str()) {
+                    all_ciphers.push(c.to_json(&config.domain));
+                }
             }
         }
     }

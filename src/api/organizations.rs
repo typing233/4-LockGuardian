@@ -4,6 +4,9 @@ use sqlx::SqlitePool;
 
 use crate::auth::middleware::AuthenticatedUser;
 use crate::error::AppError;
+use crate::models::event::{
+    Event, EVENT_ORG_USER_CONFIRMED, EVENT_ORG_USER_INVITED, EVENT_ORG_USER_REMOVED,
+};
 use crate::models::organization::*;
 use crate::models::user::User;
 
@@ -214,6 +217,20 @@ pub async fn invite_user(
                     None,
                 )
                 .await?;
+
+                Event::log(
+                    &pool,
+                    EVENT_ORG_USER_INVITED,
+                    Some(&invited_user.uuid),
+                    Some(&org_id),
+                    None,
+                    None,
+                    Some(&user.uuid),
+                    None,
+                    None,
+                )
+                .await
+                .ok();
             }
         }
     }
@@ -239,6 +256,20 @@ pub async fn confirm_user(
 
     UserOrganization::confirm(&pool, &user_org_id, &body.key).await?;
 
+    Event::log(
+        &pool,
+        EVENT_ORG_USER_CONFIRMED,
+        None,
+        Some(&org_id),
+        None,
+        None,
+        Some(&user.uuid),
+        None,
+        None,
+    )
+    .await
+    .ok();
+
     Ok(HttpResponse::Ok().finish())
 }
 
@@ -258,6 +289,20 @@ pub async fn remove_user(
     }
 
     UserOrganization::delete(&pool, &user_org_id).await?;
+
+    Event::log(
+        &pool,
+        EVENT_ORG_USER_REMOVED,
+        None,
+        Some(&org_id),
+        None,
+        None,
+        Some(&user.uuid),
+        None,
+        None,
+    )
+    .await
+    .ok();
 
     Ok(HttpResponse::Ok().finish())
 }

@@ -5,6 +5,7 @@ use sqlx::SqlitePool;
 use crate::auth::middleware::AuthenticatedUser;
 use crate::auth::two_factor as tf;
 use crate::error::AppError;
+use crate::models::event::{Event, EVENT_USER_DISABLED_2FA, EVENT_USER_ENABLED_2FA};
 use crate::models::user::User;
 
 #[derive(Deserialize)]
@@ -113,6 +114,20 @@ pub async fn activate_authenticator(
     // Update security stamp
     User::update_security_stamp(&pool, &user.uuid).await?;
 
+    Event::log(
+        &pool,
+        EVENT_USER_ENABLED_2FA,
+        Some(&user.uuid),
+        None,
+        None,
+        None,
+        Some(&user.uuid),
+        None,
+        None,
+    )
+    .await
+    .ok();
+
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "Object": "twoFactorAuthenticator",
         "Enabled": true,
@@ -140,6 +155,20 @@ pub async fn disable(
         .await?;
 
     User::update_security_stamp(&pool, &user.uuid).await?;
+
+    Event::log(
+        &pool,
+        EVENT_USER_DISABLED_2FA,
+        Some(&user.uuid),
+        None,
+        None,
+        None,
+        Some(&user.uuid),
+        None,
+        None,
+    )
+    .await
+    .ok();
 
     Ok(HttpResponse::Ok().json(serde_json::json!({
         "Object": "twoFactorProvider",
